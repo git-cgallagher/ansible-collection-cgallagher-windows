@@ -4,12 +4,14 @@
 # SPDX-License-Identifier: Internal
 
 #AnsibleRequires -CSharpUtil Ansible.Basic
+#Requires -Module ActiveDirectory
+
 $spec = @{
-    options = @{
-        state = @{ type = "str"; default = 'present'; choices = @('present','absent','rename') }
-        name = @{ type = "str"; required = $true }
+    options             = @{
+        state    = @{ type = "str"; default = 'present'; choices = @('present', 'absent', 'rename') }
+        name     = @{ type = "str"; required = $true }
         new_name = @{ type = "str"; required = $false }
-        }
+    }
     supports_check_mode = $false
 }
 
@@ -29,6 +31,9 @@ Catch { $module.FailJson("Failed to determine current sites: $($_.Exception.Mess
 
 If ($current_sites.name -contains $name) {
     $site_exists = $true
+    If ($site_exists) {
+        $dc_in_site = Get-ADDomainController -Discover -SiteName $name -ErrorAction SilentlyContinue
+    }
 }
 
 # see if new_name exists
@@ -40,9 +45,10 @@ If ($current_sites.name -contains $new_name) {
 If ($state -eq "present") {
     If (-not $site_exists) {
         Try {
-            New-ADReplicationSite -Identity $name
+            New-ADReplicationSite -Name $name
             $module.Result.changed = $true
-        } Catch {
+        }
+        Catch {
             $module.FailJson("Failed to add site: $($_.Exception.Message)", $_)
         }
     }
@@ -52,20 +58,29 @@ If ($state -eq "present") {
 # when state eq absent
 If ($state -eq "absent") {
     If ($site_exists) {
-        Try {
-            $links = Get-ADReplicationSiteLink -Filter "SitesIncluded -eq $name"
-            Foreach($link in $links) {
-                Try {
-                    Remove-ADReplicationSiteLink -Identity $link
-                    $module.Result.changed = $true
-                } Catch {
-                    $module.FailJson("Failed to remove all site links before removing site: $($_.Exception.Message)", $_)
+        If ($dc_in_site) {
+            $module.FailJson("Failed before removing site: The site cannot be deleted because the following server objects are present in the site: $dc_in_site")
+        }
+        If (-not $dc_in_site) {
+            Try {
+                $links = Get-ADReplicationSiteLink -Filter "SitesIncluded -eq '$name'"
+                If ($links) {
+                    Foreach ($link in $links) {
+                        Try {
+                            Remove-ADReplicationSiteLink -Identity $link -Confirm:$False
+                            $module.Result.changed = $true
+                        }
+                        Catch {
+                            $module.FailJson("Failed to remove all site links before removing site: $($_.Exception.Message)", $_)
+                        }
+                    }
                 }
+                Remove-ADReplicationSite -Identity $name -Confirm:$False
+                $module.Result.changed = $true
             }
-            Remove-ADReplicationSite -Identity $name
-            $module.Result.changed = $true
-        } Catch {
-            $module.FailJson("Failed to remove site: $($_.Exception.Message)", $_)
+            Catch {
+                $module.FailJson("Failed to remove site: $($_.Exception.Message)", $_)
+            }
         }
     }
 }
@@ -75,9 +90,10 @@ If ($state -eq "absent") {
 If ($state -eq "rename") {
     If (($site_exists) -and (-not $new_site_exists)) {
         Try {
-            Get-AdReplicationSite -Identity $name | Rename-ADObject $new_name
+            Get-AdReplicationSite -Identity $name | Rename-ADObject -NewName $new_name
             $module.Result.changed = $true
-        } Catch {
+        }
+        Catch {
             $module.FailJson("Failed to rename site: $($_.Exception.Message)", $_)
         }
     }
